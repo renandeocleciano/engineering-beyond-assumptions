@@ -14,13 +14,13 @@ The goal is not to demonstrate that one technology is universally better than an
 - **Reproducible experiments:** scripts, tests, benchmark procedures, and reported results.
 - **Failure analysis:** deliberate reproduction of concurrency anomalies before comparing alternatives.
 - **Engineering decisions:** architecture decision records (ADRs) and experiment limitations.
-- **Future investigations:** message delivery, retries, Kafka and RabbitMQ, observability, and AI systems. These are roadmap topics, **not implemented capabilities**.
+- **Future investigations:** message delivery, Kafka and RabbitMQ, observability, and AI systems. These are roadmap topics, **not implemented capabilities**. Transaction retries for SQLSTATE `40001` are already part of Experiment 001.
 
 ## Experiment catalog
 
 | Experiment | Question | Status | Evidence |
 | --- | --- | --- | --- |
-| **001 — PostgreSQL concurrent writes** | What happens when concurrent transactions update a shared counter? | Phase 1 executed; further investigation in progress | [Protocol and results](experiments/experiment_001/README.md) |
+| **001 — PostgreSQL concurrent writes** | What happens when concurrent transactions update a shared counter? | Phase 1 and Phase 2 recorded | [Protocol and results](experiments/experiment_001/README.md) |
 
 ### Experiment 001: correctness before performance
 
@@ -33,9 +33,22 @@ The initial reported test run found:
 - In the initial benchmark, atomic updates under `READ COMMITTED` preserved all successful increments for worker counts of 1, 2, 4, 8, and 16.
 - At higher isolation levels, PostgreSQL rejected conflicting attempts with **SQLSTATE `40001`**. The initial benchmark did not retry those attempts; they must not be mistaken for successful business operations.
 
-These findings come from the initial local test report; detailed workload parameters, raw data locations, and limitations belong in the [experiment protocol](experiments/experiment_001/README.md). The results are **environment-specific**, not production throughput claims. Follow-up work examines retries, contention, and how workload distribution changes performance. No Phase 2 result is claimed here before it is verified and documented.
+These findings come from the initial local test report. The results are **environment-specific**, not production throughput claims.
 
-**Why it matters:** a benchmark can report committed transactions while application-level updates are lost. Performance comparisons only make sense after correctness requirements are explicit.
+### Phase 2: retries and counter distribution
+
+Phase 2 is recorded. It kept the atomic and read–modify–write strategies, added a bounded retry of the **whole transaction** after SQLSTATE `40001` (5 retries, full-jitter backoff from 1 ms capped at 50 ms), and compared 1, 10, and 100 counters. The measured workload was 8 workers, 50 warmup iterations, and 500 measured iterations per worker, repeated 3 times at all three isolation levels with retry budgets of 0 and 5: **108 cells**, 4,000 logical operations each, on 2026-11-24 01:40:40–01:43:02 UTC. Warmup is excluded from the totals. Every measurement-window error was `40001`, `other_failures` was 0, and `deadlocks` was 0.
+
+On this machine the run showed:
+
+- **Atomic updates at `READ COMMITTED`** committed all 4,000 operations and lost none. One shared counter ran at about 3,100–3,200 committed operations/s, with p99 around 8–9 ms. Ten and 100 counters ran at about 5,000–6,000 operations/s, with p99 around 2–4 ms. The retry budget was idle: PostgreSQL raised no `40001`.
+- **Read–modify–write at `READ COMMITTED`** also committed all 4,000 operations and retried none. It still lost updates: about 3,390–3,428 on one counter, 903–1,124 on ten, and 378–684 on one hundred. Retries do not repair a lost update that was committed.
+- **At `REPEATABLE READ` and `SERIALIZABLE`**, lost updates stayed 0. Without retries, the hot row committed only about 990–1,012 atomic operations, or 718–743 read–modify–write operations, out of 4,000. With 5 retries, the atomic hot row reached about 3,742–3,774 commits and still exhausted 226–258 operations. Spreading the same work across 10 or 100 counters let retries commit nearly all 4,000 operations.
+- **Lock samples** (`pg_stat_activity` and ungranted `pg_locks`, every 50 ms) peaked at 6 or 7 waiting sessions on the single counter and at 0–3 sessions when the work was spread. `log_lock_waits` was on and recorded no `still waiting` lines, because waits were shorter than the 1 second `deadlock_timeout`. Lock-wait time was not measured.
+
+Cell-by-cell counts, latency, commands, and limitations are in the [experiment protocol](experiments/experiment_001/README.md). The retry cap was fixed before the run. It was not enough to commit every hot-row operation at the stronger isolation levels. Eight workers oversubscribe the 2-CPU Colima VM, and the client reaches PostgreSQL through the host port forward.
+
+**Why it matters:** a benchmark can report committed transactions while application-level updates are lost. A retry count is not a successful logical operation, and a higher throughput figure is not evidence that the counter is correct.
 
 ## Architecture at a glance
 
@@ -166,7 +179,7 @@ Architectural choices are captured in **[Architecture Decision Records](docs/adr
 
 The following are **planned areas of investigation**, not a promise that each technology will become a permanent part of the application:
 
-- **Concurrency and data integrity:** isolation levels, retries, hot rows, lock contention, and backpressure.
+- **Concurrency and data integrity:** backpressure, and workloads beyond the single-row and spread-counter cases already measured in Experiment 001.
 - **Messaging:** RabbitMQ versus Kafka for defined workload requirements; delivery semantics, replay, consumer recovery, and idempotency.
 - **Reliability and observability:** tracing, business-level outcomes, failure injection, and reconciliation.
 - **Applied AI:** secure tool execution, RAG evaluation, agent orchestration, cost/latency trade-offs, and deterministic safeguards.
