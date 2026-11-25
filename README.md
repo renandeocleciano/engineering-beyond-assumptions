@@ -10,7 +10,7 @@ The goal is not to demonstrate that one technology is universally better than an
 
 ## What you'll find here
 
-- **Working backend:** a small FastAPI application with PostgreSQL-backed counters.
+- **Working backend:** a FastAPI application with PostgreSQL-backed counters and, in progress, accounts, transfers, and a signed ledger.
 - **Reproducible experiments:** scripts, tests, benchmark procedures, and reported results.
 - **Failure analysis:** deliberate reproduction of concurrency anomalies before comparing alternatives.
 - **Engineering decisions:** architecture decision records (ADRs) and experiment limitations.
@@ -21,6 +21,7 @@ The goal is not to demonstrate that one technology is universally better than an
 | Experiment | Question | Status | Evidence |
 | --- | --- | --- | --- |
 | **001 — PostgreSQL concurrent writes** | What happens when concurrent transactions update a shared counter? | Phase 1 and Phase 2 recorded | [Protocol and results](experiments/experiment_001/README.md) |
+| **002 — Transaction API** | Which transfer strategies keep balances and ledger entries correct under concurrency? | Recorded | [Protocol and results](experiments/experiment_002/README.md) |
 
 ### Experiment 001: correctness before performance
 
@@ -50,6 +51,12 @@ Cell-by-cell counts, latency, commands, and limitations are in the [experiment p
 
 **Why it matters:** a benchmark can report committed transactions while application-level updates are lost. A retry count is not a successful logical operation, and a higher throughput figure is not evidence that the counter is correct.
 
+### Experiment 002: transfers and a ledger
+
+Experiment 002 is **recorded**. It keeps Experiment 001 intact and adds fictional accounts, laboratory funding, synchronous transfers, and a signed double-entry ledger. Amounts are integer minor units. The public path locks the two accounts in identifier order, reloads any account already present in the session, and applies the balance change with a relative SQL update.
+
+A test that loaded the same balance in two sessions and then funded both reproduced a stale write: the ledger summed to 700 and the stored balance was 600. After the fix, that test reconciles. The corrected benchmark calls `execute_transfer` directly as `pessimistic_service` and keeps the raw-SQL lock strategy as `pessimistic_sql`. On 2026-11-25 both committed every measured transfer in the hot-source and opposite-direction cells, with no balance discrepancy and no measured deadlocks. The naive strategy still committed its transfers and still left a balance that did not match the ledger. Details, including the first comparison, are in the [experiment protocol](experiments/experiment_002/README.md).
+
 ## Architecture at a glance
 
 ```text
@@ -59,7 +66,7 @@ Client / test runner
     FastAPI (Python)
         |
         v
- PostgreSQL (counters)
+ PostgreSQL (counters, accounts, ledger)
 
 Experiment runners exercise alternative concurrent-write
 strategies against the database and record their outcomes.
@@ -102,6 +109,16 @@ curl -X POST http://localhost:8000/counters \
 curl -X POST http://localhost:8000/counters/example/increment
 curl http://localhost:8000/counters/example
 ```
+
+The transaction API is part of Experiment 002 and is still under investigation. Creating an account, funding it, and transferring use integer minor units:
+
+```sh
+curl -X POST http://localhost:8000/accounts \
+  -H 'Content-Type: application/json' \
+  -d '{"currency":"USD"}'
+```
+
+`POST /accounts/{account_id}/fund` adds synthetic laboratory funds and writes a balancing treasury entry. It is not a production deposit.
 
 `GET /health` checks **process liveness**, not database readiness. Compose persists PostgreSQL data in a named volume. The example credentials and published ports are intended **only for local development**.
 
@@ -150,7 +167,7 @@ alembic upgrade head
 
 ## Reproduce the experiments
 
-See **[Experiment 001: protocol, commands, results, and limitations](experiments/experiment_001/README.md)** for the current benchmark procedure. Run the tests and benchmarks using the documented configuration rather than relying on results from another machine.
+See **[Experiment 001](experiments/experiment_001/README.md)** and **[Experiment 002](experiments/experiment_002/README.md)** for the benchmark procedures. Run the tests and benchmarks using the documented configuration rather than relying on results from another machine.
 
 When comparing runs, record at least:
 
@@ -179,7 +196,7 @@ Architectural choices are captured in **[Architecture Decision Records](docs/adr
 
 The following are **planned areas of investigation**, not a promise that each technology will become a permanent part of the application:
 
-- **Concurrency and data integrity:** backpressure, and workloads beyond the single-row and spread-counter cases already measured in Experiment 001.
+- **Concurrency and data integrity:** idempotency keys for transfers, backpressure, and workloads beyond the cases already measured.
 - **Messaging:** RabbitMQ versus Kafka for defined workload requirements; delivery semantics, replay, consumer recovery, and idempotency.
 - **Reliability and observability:** tracing, business-level outcomes, failure injection, and reconciliation.
 - **Applied AI:** secure tool execution, RAG evaluation, agent orchestration, cost/latency trade-offs, and deterministic safeguards.
@@ -189,4 +206,4 @@ The following are **planned areas of investigation**, not a promise that each te
 
 Engineering Beyond Assumptions is built as a practical, public portfolio of backend engineering work. It reflects an approach grounded in hands-on implementation, production reliability, and explicit technical trade-offs. All example data and scenarios are synthetic; they are not a reproduction of proprietary systems.
 
-**Start with the evidence:** [Experiment 001](experiments/experiment_001/README.md) · [Architecture decisions](docs/adr)
+**Start with the evidence:** [Experiment 001](experiments/experiment_001/README.md) · [Experiment 002](experiments/experiment_002/README.md) · [Architecture decisions](docs/adr)

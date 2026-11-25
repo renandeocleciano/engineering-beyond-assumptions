@@ -7,9 +7,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.ledger.api import router as ledger_router
 from app.models import Counter
 
 app = FastAPI(title="Engineering Beyond Assumptions", version="0.1.0")
+app.include_router(ledger_router)
 SessionDep = Annotated[Session, Depends(get_session)]
 
 
@@ -24,6 +26,7 @@ class CounterResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    """Process liveness. This does not check database connectivity."""
     return {"status": "ok"}
 
 
