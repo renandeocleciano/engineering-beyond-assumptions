@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
@@ -13,13 +13,16 @@ from app.ledger.errors import (
     AccountNotFound,
     AccountUnavailable,
     CurrencyMismatch,
+    IdempotencyKeyConflict,
     InsufficientFunds,
     TransferNotFound,
 )
+from app.ledger.faults import maybe_fault
+from app.ledger.fingerprint import validate_idempotency_key
+from app.ledger.idempotency import execute_idempotent_transfer
 from app.ledger.models import Account, Funding, LedgerEntry, Transfer
 from app.ledger.service import (
     create_customer_account,
-    execute_transfer,
     fund_account,
     get_account,
     get_transfer,
@@ -79,6 +82,7 @@ class TransferResponse(BaseModel):
     status: str
     created_at: datetime
     completed_at: datetime
+    idempotent_replay: bool = False
 
 
 class EntryResponse(BaseModel):
@@ -143,18 +147,38 @@ def post_fund(account_id: UUID, payload: FundRequest, session: SessionDep) -> Fu
     return _funding_response(funding, account.balance_minor)
 
 
-@router.post("/transfers", response_model=TransferResponse, status_code=201)
-def post_transfer(payload: TransferCreate, session: SessionDep) -> TransferResponse:
+@router.post("/transfers", response_model=TransferResponse)
+def post_transfer(
+    payload: TransferCreate,
+    session: SessionDep,
+    response: Response,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> TransferResponse:
+    """Create a transfer. Requires Idempotency-Key for Experiment 003.
+
+    New successful transfers return 201. Replays of the same key and payload
+    return 200 with the original transfer. Business rejections (for example
+    insufficient funds) roll back the idempotency reservation so a later retry
+    can reevaluate balances. A same key with a different payload returns 409.
+    """
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
     try:
-        transfer = execute_transfer(
+        validate_idempotency_key(idempotency_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        outcome = execute_idempotent_transfer(
             session,
-            payload.source_account_id,
-            payload.destination_account_id,
-            payload.amount_minor,
-            payload.currency,
+            idempotency_key=idempotency_key,
+            source_account_id=payload.source_account_id,
+            destination_account_id=payload.destination_account_id,
+            amount_minor=payload.amount_minor,
+            currency=payload.currency,
         )
         session.commit()
-        session.refresh(transfer)
+        maybe_fault("after_commit_before_response")
+        session.refresh(outcome.transfer)
     except AccountNotFound as exc:
         session.rollback()
         raise HTTPException(status_code=404, detail="Account not found") from exc
@@ -167,7 +191,16 @@ def post_transfer(payload: TransferCreate, session: SessionDep) -> TransferRespo
     except InsufficientFunds as exc:
         session.rollback()
         raise HTTPException(status_code=409, detail="Insufficient funds") from exc
-    return _transfer_response(transfer)
+    except IdempotencyKeyConflict as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409, detail="Idempotency-Key was reused with a different payload"
+        ) from exc
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    response.status_code = 200 if outcome.replay else 201
+    return _transfer_response(outcome.transfer, idempotent_replay=outcome.replay)
 
 
 @router.get("/transfers/{transfer_id}", response_model=TransferResponse)
@@ -205,7 +238,7 @@ def _funding_response(funding: Funding, balance_minor: int) -> FundingResponse:
     )
 
 
-def _transfer_response(transfer: Transfer) -> TransferResponse:
+def _transfer_response(transfer: Transfer, *, idempotent_replay: bool = False) -> TransferResponse:
     return TransferResponse(
         id=transfer.id,
         source_account_id=transfer.source_account_id,
@@ -215,6 +248,7 @@ def _transfer_response(transfer: Transfer) -> TransferResponse:
         status=transfer.status,
         created_at=transfer.created_at,
         completed_at=transfer.completed_at,
+        idempotent_replay=idempotent_replay,
     )
 
 

@@ -22,6 +22,7 @@ The goal is not to demonstrate that one technology is universally better than an
 | --- | --- | --- | --- |
 | **001 — PostgreSQL concurrent writes** | What happens when concurrent transactions update a shared counter? | Phase 1 and Phase 2 recorded | [Protocol and results](experiments/experiment_001/README.md) |
 | **002 — Transaction API** | Which transfer strategies keep balances and ledger entries correct under concurrency? | Recorded | [Protocol and results](experiments/experiment_002/README.md) |
+| **003 — Idempotency under concurrency** | What happens when a transfer commits but the client times out or retries? | Recorded | [Protocol and results](experiments/experiment_003/README.md) |
 
 ### Experiment 001: correctness before performance
 
@@ -56,6 +57,12 @@ Cell-by-cell counts, latency, commands, and limitations are in the [experiment p
 Experiment 002 is **recorded**. It keeps Experiment 001 intact and adds fictional accounts, laboratory funding, synchronous transfers, and a signed double-entry ledger. Amounts are integer minor units. The public path locks the two accounts in identifier order, reloads any account already present in the session, and applies the balance change with a relative SQL update.
 
 A test that loaded the same balance in two sessions and then funded both reproduced a stale write: the ledger summed to 700 and the stored balance was 600. After the fix, that test reconciles. The corrected benchmark calls `execute_transfer` directly as `pessimistic_service` and keeps the raw-SQL lock strategy as `pessimistic_sql`. On 2026-11-25 both committed every measured transfer in the hot-source and opposite-direction cells, with no balance discrepancy and no measured deadlocks. The naive strategy still committed its transfers and still left a balance that did not match the ledger. Details, including the first comparison, are in the [experiment protocol](experiments/experiment_002/README.md).
+
+### Experiment 003: idempotency under concurrency and failure
+
+Experiment 003 is **recorded**. `POST /transfers` requires an `Idempotency-Key`. The reservation and transfer commit in one PostgreSQL transaction under a unique `(scope, key)` constraint. On 2026-11-27, sequential and concurrent equivalent retries produced one transfer per key; lost-response recovery replayed the original result 20/20 times. Unsafe retries and a deterministic naive check-then-insert race duplicated movements while still reconciling per-transfer ledger invariants.
+
+Publication evidence (schema v2 JSON) lives under [`experiments/experiment_003/results/`](experiments/experiment_003/results/). Benchmarks are **service-level**, **single-run**, and **not HTTP throughput**. Traffic cells use 2 warmup + 40 measured iterations; `committed_transfers` includes warmup rows. Keys are laboratory-wide with **no authentication**—a non-production limitation. Protocol, reproduction commands, and limitations: [Experiment 003](experiments/experiment_003/README.md). Independent audit: [technical evidence report](docs/experiment-003-technical-evidence-report.md).
 
 ## Architecture at a glance
 
@@ -110,7 +117,7 @@ curl -X POST http://localhost:8000/counters/example/increment
 curl http://localhost:8000/counters/example
 ```
 
-The transaction API is part of Experiment 002 and is still under investigation. Creating an account, funding it, and transferring use integer minor units:
+The transaction API uses integer minor units. Creating an account and funding it:
 
 ```sh
 curl -X POST http://localhost:8000/accounts \
@@ -119,6 +126,8 @@ curl -X POST http://localhost:8000/accounts \
 ```
 
 `POST /accounts/{account_id}/fund` adds synthetic laboratory funds and writes a balancing treasury entry. It is not a production deposit.
+
+`POST /transfers` requires an `Idempotency-Key` header (Experiment 003). Replays of the same key and payload return the original transfer; a different payload with the same key returns `409`.
 
 `GET /health` checks **process liveness**, not database readiness. Compose persists PostgreSQL data in a named volume. The example credentials and published ports are intended **only for local development**.
 
@@ -167,7 +176,7 @@ alembic upgrade head
 
 ## Reproduce the experiments
 
-See **[Experiment 001](experiments/experiment_001/README.md)** and **[Experiment 002](experiments/experiment_002/README.md)** for the benchmark procedures. Run the tests and benchmarks using the documented configuration rather than relying on results from another machine.
+See **[Experiment 001](experiments/experiment_001/README.md)**, **[Experiment 002](experiments/experiment_002/README.md)**, and **[Experiment 003](experiments/experiment_003/README.md)** for the benchmark procedures. Experiment 003 reproduction writes JSON under `experiments/experiment_003/results/v2-publication/` (see that README). Run the tests and benchmarks using the documented configuration rather than relying on results from another machine.
 
 When comparing runs, record at least:
 
@@ -196,7 +205,7 @@ Architectural choices are captured in **[Architecture Decision Records](docs/adr
 
 The following are **planned areas of investigation**, not a promise that each technology will become a permanent part of the application:
 
-- **Concurrency and data integrity:** idempotency keys for transfers, backpressure, and workloads beyond the cases already measured.
+- **Concurrency and data integrity:** backpressure and workloads beyond the idempotency cases measured in Experiment 003.
 - **Messaging:** RabbitMQ versus Kafka for defined workload requirements; delivery semantics, replay, consumer recovery, and idempotency.
 - **Reliability and observability:** tracing, business-level outcomes, failure injection, and reconciliation.
 - **Applied AI:** secure tool execution, RAG evaluation, agent orchestration, cost/latency trade-offs, and deterministic safeguards.
@@ -206,4 +215,4 @@ The following are **planned areas of investigation**, not a promise that each te
 
 Engineering Beyond Assumptions is built as a practical, public portfolio of backend engineering work. It reflects an approach grounded in hands-on implementation, production reliability, and explicit technical trade-offs. All example data and scenarios are synthetic; they are not a reproduction of proprietary systems.
 
-**Start with the evidence:** [Experiment 001](experiments/experiment_001/README.md) · [Experiment 002](experiments/experiment_002/README.md) · [Architecture decisions](docs/adr)
+**Start with the evidence:** [Experiment 001](experiments/experiment_001/README.md) · [Experiment 002](experiments/experiment_002/README.md) · [Experiment 003](experiments/experiment_003/README.md) · [Architecture decisions](docs/adr)

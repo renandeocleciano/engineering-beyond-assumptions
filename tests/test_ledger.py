@@ -1,11 +1,10 @@
 """PostgreSQL tests for transfer invariants. SQLite is not a substitute."""
 
-import os
 import uuid
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -16,19 +15,8 @@ from app.ledger.errors import InsufficientFunds
 from app.ledger.models import Account
 from app.ledger.reconcile import invariant_report, violations
 from app.ledger.service import execute_transfer, fund_account
-from app.main import app
 
 pytestmark = pytest.mark.postgres
-
-
-@pytest.fixture
-def client() -> Iterator[TestClient]:
-    if not os.environ.get("DATABASE_URL"):
-        pytest.skip("set DATABASE_URL to a migrated PostgreSQL database")
-    with TestClient(app) as test_client:
-        yield test_client
-    with engine.begin() as conn:
-        conn.execute(text("TRUNCATE ledger_entries, fundings, transfers, accounts"))
 
 
 def _account(client: TestClient, currency: str = "USD") -> str:
@@ -43,22 +31,39 @@ def _fund(client: TestClient, account_id: str, amount: int) -> None:
     assert response.json()["balance_minor"] == amount
 
 
+def _transfer(
+    client: TestClient,
+    *,
+    source: str,
+    destination: str,
+    amount: int,
+    currency: str = "USD",
+    key: str | None = None,
+) -> httpx.Response:
+    headers = {"Idempotency-Key": key or f"ledger-test-{uuid.uuid4()}"}
+    response = client.post(
+        "/transfers",
+        headers=headers,
+        json={
+            "source_account_id": source,
+            "destination_account_id": destination,
+            "amount_minor": amount,
+            "currency": currency,
+        },
+    )
+    assert isinstance(response, httpx.Response)
+    return response
+
+
 def test_account_fund_transfer_and_entries(client: TestClient) -> None:
     source = _account(client)
     destination = _account(client)
     _fund(client, source, 1050)
-    created = client.post(
-        "/transfers",
-        json={
-            "source_account_id": source,
-            "destination_account_id": destination,
-            "amount_minor": 250,
-            "currency": "USD",
-        },
-    )
+    created = _transfer(client, source=source, destination=destination, amount=250)
     assert created.status_code == 201
     body = created.json()
     assert body["status"] == "completed"
+    assert body["idempotent_replay"] is False
     assert client.get(f"/transfers/{body['id']}").json()["amount_minor"] == 250
     assert client.get(f"/accounts/{source}").json()["balance_minor"] == 800
     assert client.get(f"/accounts/{destination}").json()["balance_minor"] == 250
@@ -76,6 +81,7 @@ def test_rejects_invalid_transfer_requests(client: TestClient) -> None:
     _fund(client, source, 500)
     same = client.post(
         "/transfers",
+        headers={"Idempotency-Key": "same-account-key-01"},
         json={
             "source_account_id": source,
             "destination_account_id": source,
@@ -84,24 +90,16 @@ def test_rejects_invalid_transfer_requests(client: TestClient) -> None:
         },
     )
     assert same.status_code == 422
-    mismatch = client.post(
-        "/transfers",
-        json={
-            "source_account_id": source,
-            "destination_account_id": other,
-            "amount_minor": 100,
-            "currency": "USD",
-        },
+    mismatch = _transfer(
+        client, source=source, destination=other, amount=100, key="currency-mismatch-01"
     )
     assert mismatch.status_code == 409
-    poor = client.post(
-        "/transfers",
-        json={
-            "source_account_id": source,
-            "destination_account_id": _account(client),
-            "amount_minor": 501,
-            "currency": "USD",
-        },
+    poor = _transfer(
+        client,
+        source=source,
+        destination=_account(client),
+        amount=501,
+        key="insufficient-funds-01",
     )
     assert poor.status_code == 409
     assert client.get(f"/accounts/{source}").json()["balance_minor"] == 500
@@ -109,6 +107,16 @@ def test_rejects_invalid_transfer_requests(client: TestClient) -> None:
         assert violations(conn) == 0
         transfers = conn.scalar(text("SELECT count(*) FROM transfers"))
     assert transfers == 0
+    missing_key = client.post(
+        "/transfers",
+        json={
+            "source_account_id": source,
+            "destination_account_id": _account(client),
+            "amount_minor": 10,
+            "currency": "USD",
+        },
+    )
+    assert missing_key.status_code == 400
 
 
 def test_concurrent_overspend_allows_exactly_one_transfer(client: TestClient) -> None:

@@ -23,3 +23,11 @@ class CurrencyMismatch(LedgerError):
 
 class InsufficientFunds(LedgerError):
     pass
+
+
+class IdempotencyKeyConflict(LedgerError):
+    """Same scope and key with a different request fingerprint."""
+
+
+class IdempotencyKeyRequired(LedgerError):
+    pass

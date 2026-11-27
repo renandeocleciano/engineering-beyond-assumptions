@@ -81,6 +81,46 @@ class Transfer(Base):
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class IdempotencyRecord(Base):
+    """Durable identity for a successful laboratory transfer.
+
+    A reserved row exists only inside an open transaction. Completed rows are
+    committed with the transfer they protect. Scope is laboratory-wide; the API
+    has no tenant or authentication model yet.
+    """
+
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        CheckConstraint("status IN ('reserved', 'completed')", name="ck_idempotency_status"),
+        CheckConstraint(
+            "(status = 'reserved' AND transfer_id IS NULL AND completed_at IS NULL) "
+            "OR (status = 'completed' AND transfer_id IS NOT NULL AND completed_at IS NOT NULL)",
+            name="ck_idempotency_status_shape",
+        ),
+        Index(
+            "uq_idempotency_scope_key",
+            "scope",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index(
+            "ix_idempotency_records_transfer_id",
+            "transfer_id",
+            unique=True,
+            postgresql_where=text("transfer_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    transfer_id: Mapped[UUID | None] = mapped_column(ForeignKey("transfers.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="reserved")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class LedgerEntry(Base):
     """Immutable signed movement. Positive credits a customer; negative debits a customer."""
 

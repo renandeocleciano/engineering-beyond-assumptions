@@ -1,0 +1,62 @@
+{
+  "amount_minor": 25,
+  "backoff_base_ms": 1.0,
+  "backoff_cap_ms": 50.0,
+  "correctness": {
+    "committed_transfers": 20,
+    "conflicting_key_requests": 0,
+    "deduplicated_requests": 20,
+    "duplicate_transfer_effects": 0,
+    "invariant_violations": 0,
+    "logical_operations": 20,
+    "recovered_lost_responses": 20,
+    "rollbacks": 0,
+    "service_attempts": 40,
+    "unique_logical_successes": 20
+  },
+  "duplicate_rate": 0.3,
+  "ended_at": "2026-11-27T13:11:23.937628+00:00",
+  "expected_duplicates_for_unsafe": false,
+  "experiment_id": "003",
+  "git_commit_sha": "ccdff1d468173eb91673821b503914f704aed054",
+  "host": {
+    "cpu_count": 10,
+    "processor": "arm",
+    "system": "Darwin"
+  },
+  "inject_lost_response_rate": 0.0,
+  "isolation_level": "READ COMMITTED",
+  "measured_iterations": 20,
+  "performance": {
+    "initial_attempt_latency_ms_p50": 4.841,
+    "latency_ms_p50": 3.485,
+    "latency_ms_p95": 5.793,
+    "latency_ms_p99": 6.028,
+    "logical_latency_ms_p50": 7.273,
+    "logical_latency_ms_p95": 8.774,
+    "mean_request_latency_ms": 3.812,
+    "requests_per_second": 262.362,
+    "retry_attempt_latency_ms_p50": 2.499,
+    "unique_transfers_per_second": 131.181
+  },
+  "postgresql_version": "17.11 (Debian 17.11-1.pgdg13+2)",
+  "python_version": "3.13.11",
+  "random_seed": 42,
+  "reliability": {
+    "error_counts": {
+      "error:RuntimeError": 20
+    },
+    "retry_counts": 20,
+    "retry_exhausted": 0,
+    "transport_timeouts": 20
+  },
+  "retry_budget": 3,
+  "retry_policy": "bounded_full_jitter",
+  "scenario": "failure_recovery",
+  "sqlalchemy_version": "2.1.9",
+  "started_at": "2026-11-27T13:11:23.773099+00:00",
+  "strategy": "safe",
+  "warmup_iterations": 0,
+  "workers": 1,
+  "working_tree_dirty": true
+}

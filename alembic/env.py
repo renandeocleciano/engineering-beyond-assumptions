@@ -3,7 +3,13 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from app.config import Settings
 from app.db import Base
-from app.ledger.models import Account, Funding, LedgerEntry, Transfer  # noqa: F401
+from app.ledger.models import (  # noqa: F401
+    Account,
+    Funding,
+    IdempotencyRecord,
+    LedgerEntry,
+    Transfer,
+)
 from app.models import Counter  # noqa: F401
 
 config = context.config
